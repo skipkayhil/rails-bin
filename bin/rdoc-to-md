@@ -1,0 +1,113 @@
+#!/usr/bin/env ruby
+
+require "optparse"
+require "pathname"
+require "strscan"
+
+OPTIONS = {}
+
+OptionParser
+  .new do |opts|
+    opts.banner = "Usage: rdoc-to-md RAILS_ROOT [options]"
+
+    opts.on("-a", "Apply changes")
+    opts.on("--only=FOLDERS", Array)
+  end
+  .parse!(into: OPTIONS)
+
+RAILS_PATH = Pathname.new(ARGV.first)
+
+folders = Dir["#{RAILS_PATH}/*/*.gemspec"].map { |p| Pathname.new(p).dirname }
+
+unless OPTIONS[:only].nil?
+  folders.filter! { |path| OPTIONS[:only].include?(File.basename(path)) }
+end
+
+class CodeBlockConverter
+  def initialize(content, file_path)
+    @file_path = file_path
+    @output = ""
+    @scanner = StringScanner.new(content)
+    @code_block = []
+  end
+
+  def convert!
+    process
+    File.write(@file_path, @output)
+  end
+
+  def print
+    process
+    puts @output
+  end
+
+  private
+
+  def process
+    check_comments!
+
+    while line = next_line
+      if line.include?("#   ") || (!@code_block.empty? && blank_comment?(line))
+        @code_block << line
+      elsif !@code_block.empty?
+        pop_code_block
+        @output << line
+      else
+        @output << line
+      end
+    end
+  end
+
+  def check_comments!
+    first = next_line
+    unless first == "# frozen_string_literal: true\n"
+      raise "first line not magic string comment: '#{first}'"
+    end
+
+    @output << first << "# :markup: markdown\n"
+  end
+
+  def pop_code_block
+    indentation = @code_block.first.index("#")
+
+    # TODO: can't tell if format is doing anything yet
+    @output << " " * indentation << "# ```ruby\n"
+
+    trailing_blank_comments = []
+    while blank_comment?(@code_block.last)
+      trailing_blank_comments << @code_block.pop
+    end
+
+    @code_block.each { |l| @output << l.sub("#   ", "# ") }
+
+    @output << " " * indentation << "# ```\n"
+
+    trailing_blank_comments.each { |l| @output << l }
+
+    @code_block = []
+  end
+
+  def blank_comment?(line)
+    line.match?(/ +#\n/)
+  end
+
+  def next_line
+    @scanner.scan_until(/\n/)
+  end
+end
+
+folders.each do |folder|
+  ruby_files = Dir["#{folder}/{app,lib}/**/*.rb"]
+
+  ruby_files.each do |file_path|
+    content = File.read(file_path)
+    next if content.include?(":markup: markdown")
+
+    converter = CodeBlockConverter.new(content, file_path)
+    if OPTIONS[:a]
+      converter.convert!
+    else
+      converter.print
+    end
+  end
+end
