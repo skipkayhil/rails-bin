@@ -26,6 +26,82 @@ unless OPTIONS[:only].nil?
   folders.filter! { |path| OPTIONS[:only].include?(File.basename(path)) }
 end
 
+class Comment
+  class << self
+    def from(comment_nodes)
+      comments_source_lines = source_lines_for(comment_nodes)
+
+      if comments_source_lines.first == "##"
+        MetaComment
+      else
+        Comment
+      end.new(comments_source_lines)
+    end
+
+    private
+
+    def source_lines_for(comment_nodes)
+      comment_nodes.map { _1.location.slice }
+    end
+  end
+
+  def initialize(source_lines)
+    @source_lines = source_lines
+
+    strip_hash_prefix!
+  end
+
+  def write!(out, indentation)
+    as_markdown.each_line do |new_markdown_line|
+      out << commented(new_markdown_line, indentation).rstrip << "\n"
+    end
+  end
+
+  private
+
+  attr_reader :source_lines
+
+  def strip_hash_prefix!
+    source_lines.each { |line|
+      line.delete_prefix!("#")
+      line.delete_prefix!(" ")
+    }
+  end
+
+  def commented(markdown, indentation)
+    (" " * indentation) + "# " + markdown
+  end
+
+  def as_markdown
+    converter.convert(source_lines.join("\n"))
+  end
+
+  def converter
+    RDoc::Markup::ToMarkdown.new
+  end
+end
+
+class MetaComment < Comment
+  def write!(out, indentation)
+    spaces = " " * indentation
+
+    out << spaces << "##\n"                                # ##
+    out << commented(source_lines[1], indentation) << "\n" # # :method: ...
+
+    super
+  end
+
+  private
+
+  def as_markdown
+    converter.convert(content_after_directive)
+  end
+
+  def content_after_directive
+    source_lines[2..].join("\n")
+  end
+end
+
 class CommentVisitor < Prism::BasicVisitor
   attr_reader :new_comments, :old_comment_lines
 
@@ -44,10 +120,6 @@ class CommentVisitor < Prism::BasicVisitor
 
   private
 
-  def converter
-    RDoc::Markup::ToMarkdown.new
-  end
-
   def process?(comments)
     return false if comments.empty?
 
@@ -64,20 +136,7 @@ class CommentVisitor < Prism::BasicVisitor
     old_comment_range = line_range_for(comments)
     old_comment_range.each { @old_comment_lines << _1 }
 
-    comments_source_lines = source_lines_for(comments)
-
-    comment_as_rdoc = comments_source_lines.each { |line|
-      line.delete_prefix!("#")
-      line.delete_prefix!(" ")
-    }.join("\n")
-
-    comment_as_md = converter.convert(comment_as_rdoc)
-
-    @new_comments[old_comment_range.begin] = comment_as_md
-  end
-
-  def source_lines_for(comments)
-    comments.map { _1.location.slice }
+    @new_comments[old_comment_range.begin] = Comment.from(comments)
   end
 
   def line_range_for(comments)
@@ -133,9 +192,7 @@ class CodeBlockConverter
         if new_comment = @cv.new_comments[line_number]
           indentation = old_line.index("#")
 
-          new_comment.each_line do |new_markdown_line|
-            out << commented(new_markdown_line, indentation).rstrip << "\n"
-          end
+          new_comment.write!(out, indentation)
         end
       else
         out << old_line
@@ -145,9 +202,6 @@ class CodeBlockConverter
     out
   end
 
-  def commented(markdown, indentation)
-    (" " * indentation) + "# " + markdown
-  end
 end
 
 folders.each do |folder|
